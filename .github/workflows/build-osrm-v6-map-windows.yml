@@ -1,0 +1,179 @@
+name: Build OSRM v6 Windows Map
+
+on:
+  workflow_dispatch:
+    inputs:
+      pbf_url:
+        description: "OpenStreetMap PBF URL"
+        required: true
+        default: "https://download.geofabrik.de/north-america/canada-latest.osm.pbf"
+      dataset_name:
+        description: "Output dataset base name without .osrm"
+        required: true
+        default: "canada-latest"
+
+jobs:
+  build-map-windows:
+    name: Build map with Windows OSRM v6 runtime
+    runs-on: windows-2022
+    timeout-minutes: 720
+
+    steps:
+      - name: Show runner info
+        shell: pwsh
+        run: |
+          $PSVersionTable
+          Get-PSDrive -PSProvider FileSystem
+          git --version
+
+      - name: Install current R
+        shell: pwsh
+        run: |
+          choco install r.project -y --no-progress
+          $rDirs = Get-ChildItem "C:\Program Files\R" -Directory | Sort-Object Name -Descending
+          if (-not $rDirs) { throw "R did not install." }
+          $rScript = Join-Path $rDirs[0].FullName "bin\Rscript.exe"
+          if (-not (Test-Path $rScript)) { throw "Rscript not found at $rScript" }
+          echo "RSCRIPT=$rScript" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $rScript --version
+
+      - name: Download official OSRM v6 Windows runtime with osrm.backend
+        shell: pwsh
+        run: |
+          $script = @'
+          options(timeout = 3600)
+          install.packages("osrm.backend", repos = "https://cloud.r-project.org")
+          library(osrm.backend)
+          install_dir <- osrm_install(
+            version = "v6.0.0",
+            dest_dir = "C:/osrm-official-v6",
+            force = TRUE,
+            path_action = "none",
+            quiet = FALSE
+          )
+          cat("OSRM_INSTALL_DIR=", normalizePath(install_dir, winslash = "/"), "\n", sep = "")
+          '@
+          Set-Content -Path "$env:GITHUB_WORKSPACE\get-osrm-v6.R" -Value $script
+          & $env:RSCRIPT "$env:GITHUB_WORKSPACE\get-osrm-v6.R"
+
+          Get-ChildItem C:\osrm-official-v6 -Recurse | Select-Object FullName,Length | Out-File "$env:GITHUB_WORKSPACE\osrm-official-files.txt"
+          Get-Content "$env:GITHUB_WORKSPACE\osrm-official-files.txt" | Select-Object -First 200
+
+      - name: Locate OSRM tools
+        shell: pwsh
+        run: |
+          $tools = @("osrm-routed.exe","osrm-extract.exe","osrm-partition.exe","osrm-customize.exe")
+          foreach ($tool in $tools) {
+            $found = Get-ChildItem C:\osrm-official-v6 -Recurse -Filter $tool | Select-Object -First 1
+            if (-not $found) { throw "$tool not found under C:\osrm-official-v6" }
+            $envName = ($tool -replace "\.exe","" -replace "-","_").ToUpper()
+            echo "$envName=$($found.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "$tool = $($found.FullName)"
+          }
+
+          & "$env:OSRM_ROUTED" --version
+
+      - name: Get OSRM v6 profiles
+        shell: pwsh
+        run: |
+          cd $env:GITHUB_WORKSPACE
+          git clone --depth 1 --branch v6.0.0 https://github.com/Project-OSRM/osrm-backend.git osrm-source
+          if (-not (Test-Path "$env:GITHUB_WORKSPACE\osrm-source\profiles\car.lua")) {
+            throw "car.lua profile not found."
+          }
+
+      - name: Download PBF
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\data" | Out-Null
+          $pbf = "$env:GITHUB_WORKSPACE\data\${{ github.event.inputs.dataset_name }}.osm.pbf"
+          curl.exe -L --retry 5 --retry-delay 20 -o "$pbf" "${{ github.event.inputs.pbf_url }}"
+          if (-not (Test-Path $pbf)) { throw "PBF download failed." }
+          Get-Item $pbf | Select-Object FullName,Length
+
+      - name: Extract map with Windows OSRM
+        shell: pwsh
+        run: |
+          $dataDir = "$env:GITHUB_WORKSPACE\data"
+          $pbf = Join-Path $dataDir "${{ github.event.inputs.dataset_name }}.osm.pbf"
+          $profile = "$env:GITHUB_WORKSPACE\osrm-source\profiles\car.lua"
+
+          Write-Host "Running osrm-extract..."
+          & "$env:OSRM_EXTRACT" -p "$profile" "$pbf"
+          if ($LASTEXITCODE -ne 0) { throw "osrm-extract failed with exit code $LASTEXITCODE" }
+
+          Get-ChildItem $dataDir -Filter "${{ github.event.inputs.dataset_name }}.osrm*" | Sort-Object Length -Descending | Select-Object Name,Length
+
+      - name: Partition map with Windows OSRM
+        shell: pwsh
+        run: |
+          $basePath = "$env:GITHUB_WORKSPACE\data\${{ github.event.inputs.dataset_name }}.osrm"
+
+          Write-Host "Running osrm-partition..."
+          & "$env:OSRM_PARTITION" "$basePath"
+          if ($LASTEXITCODE -ne 0) { throw "osrm-partition failed with exit code $LASTEXITCODE" }
+
+          Get-ChildItem "$env:GITHUB_WORKSPACE\data" -Filter "${{ github.event.inputs.dataset_name }}.osrm*" | Sort-Object Length -Descending | Select-Object Name,Length
+
+      - name: Customize map with Windows OSRM
+        shell: pwsh
+        run: |
+          $basePath = "$env:GITHUB_WORKSPACE\data\${{ github.event.inputs.dataset_name }}.osrm"
+
+          Write-Host "Running osrm-customize..."
+          & "$env:OSRM_CUSTOMIZE" "$basePath"
+          if ($LASTEXITCODE -ne 0) { throw "osrm-customize failed with exit code $LASTEXITCODE" }
+
+          Get-ChildItem "$env:GITHUB_WORKSPACE\data" -Filter "${{ github.event.inputs.dataset_name }}.osrm*" | Sort-Object Length -Descending | Select-Object Name,Length
+
+      - name: Smoke test Windows-generated map
+        shell: pwsh
+        run: |
+          $basePath = "$env:GITHUB_WORKSPACE\data\${{ github.event.inputs.dataset_name }}.osrm"
+
+          $proc = Start-Process -FilePath "$env:OSRM_ROUTED" -ArgumentList @("--algorithm","mld","--port","5100",$basePath) -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 45
+
+            $nearestUrl = "http://127.0.0.1:5100/nearest/v1/driving/-75.6972,45.4215?number=1"
+            $routeUrl = "http://127.0.0.1:5100/route/v1/driving/-75.6972,45.4215;-79.3832,43.6532?overview=false"
+
+            curl.exe -sS "$nearestUrl" -o "$env:GITHUB_WORKSPACE\data\SMOKE-NEAREST-OTTAWA.json"
+            curl.exe -sS "$routeUrl" -o "$env:GITHUB_WORKSPACE\data\SMOKE-ROUTE-OTTAWA-TORONTO.json"
+
+            $nearest = Get-Content "$env:GITHUB_WORKSPACE\data\SMOKE-NEAREST-OTTAWA.json" -Raw
+            $route = Get-Content "$env:GITHUB_WORKSPACE\data\SMOKE-ROUTE-OTTAWA-TORONTO.json" -Raw
+
+            Write-Host "Nearest:"
+            Write-Host $nearest
+            Write-Host "Route:"
+            Write-Host $route
+
+            if ($nearest -notmatch '"code"\s*:\s*"Ok"') { throw "Nearest smoke test failed." }
+            if ($route -notmatch '"code"\s*:\s*"Ok"') { throw "Route smoke test failed." }
+          }
+          finally {
+            if ($proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force
+            }
+          }
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          $stage = "$env:GITHUB_WORKSPACE\artifact"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item "$env:GITHUB_WORKSPACE\data\${{ github.event.inputs.dataset_name }}.osrm*" $stage -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\data\SMOKE-*.json" $stage -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\osrm-official-files.txt" $stage -Force
+
+          Get-ChildItem $stage | Sort-Object Length -Descending | Select-Object Name,Length | Tee-Object -FilePath "$stage\ARTIFACT-FILES.txt"
+
+      - name: Upload Windows-generated OSRM v6 map artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osrm-v6-windows-generated-${{ github.event.inputs.dataset_name }}-mld
+          path: artifact
+          compression-level: 0
+          if-no-files-found: error
