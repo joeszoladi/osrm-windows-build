@@ -36,6 +36,8 @@ jobs:
 
           # OSRM 5.26 is old. These are the modern vcpkg ports/features needed to satisfy
           # its older CMake files as closely as possible.
+          # Do not install luabind here: current vcpkg no longer has a luabind port,
+          # and OSRM v5.26.0 uses sol2/Lua directly for this runtime build.
           C:\vcpkg\vcpkg.exe install --triplet x64-windows `
             boost-algorithm `
             boost-align `
@@ -59,7 +61,6 @@ jobs:
             gtest `
             libosmium `
             lua `
-            luabind `
             protozero `
             stxxl `
             zlib
