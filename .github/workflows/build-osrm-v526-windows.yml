@@ -110,6 +110,8 @@ jobs:
           # Modern vcpkg exposes these through boost-iostreams features instead.
           $text = $text -replace "(?m)^\s*zlib\s*$", ""
           $text = $text -replace "(?m)^\s*bzip2\s*$", ""
+          # Tests/benchmarks are patched out below, so don't require Boost.Test at configure time.
+          $text = $text -replace "(?m)^\s*unit_test_framework\s*$", ""
 
           # Do not generate/install the old pkg-config file. OSRM v5.26's libosrm.pc path
           # can evaluate TARGET_LINKER_FILE on modern Boost imported targets, which breaks configure.
