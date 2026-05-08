@@ -61,10 +61,15 @@ jobs:
             boost-system:x64-windows `
             boost-thread:x64-windows `
             boost-test:x64-windows `
+            boost-zlib:x64-windows `
+            boost-bzip2:x64-windows `
             zlib:x64-windows `
             bzip2:x64-windows `
             expat:x64-windows `
             lua:x64-windows
+
+          Write-Host "Installed Boost CMake config packages:"
+          Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows\share" -Directory | Where-Object { $_.Name -like "boost*" } | Sort-Object Name | Select-Object Name | Format-Table -AutoSize
 
       - name: Build old TBB 2020.2 for OSRM v5.26
         shell: pwsh
