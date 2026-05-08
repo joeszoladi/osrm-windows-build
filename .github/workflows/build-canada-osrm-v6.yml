@@ -60,11 +60,14 @@ jobs:
             -v "${PWD}/data:/data" \
             ghcr.io/project-osrm/osrm-backend:v6.0.0 \
             osrm-extract -p /opt/car.lua "/data/${{ inputs.pbf_name }}"
+          ls -lh data | tail -80
 
       - name: Normalize OSRM base filename
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
+
           PBF_NAME="${{ inputs.pbf_name }}"
           SRC_BASE="${PBF_NAME%.osm.pbf}"
           OUT_BASE="${{ inputs.base_name }}"
@@ -73,16 +76,31 @@ jobs:
           echo "Output base: ${OUT_BASE}"
 
           if [ "${SRC_BASE}" != "${OUT_BASE}" ]; then
-            shopt -s nullglob
-            for file in data/${SRC_BASE}.osrm*; do
+            files=(data/${SRC_BASE}.osrm*)
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "ERROR: No files found matching data/${SRC_BASE}.osrm*"
+              ls -lh data
+              exit 1
+            fi
+
+            for file in "${files[@]}"; do
               new_file="data/${OUT_BASE}${file#data/${SRC_BASE}}"
               echo "Renaming ${file} -> ${new_file}"
               mv "${file}" "${new_file}"
             done
           fi
 
-          test -f "data/${OUT_BASE}.osrm"
-          ls -lh data/${OUT_BASE}.osrm data/${OUT_BASE}.osrm.*
+          files=(data/${OUT_BASE}.osrm*)
+          echo "OSRM file count after extract/normalize: ${#files[@]}"
+          if [ ${#files[@]} -lt 5 ]; then
+            echo "ERROR: Not enough OSRM files were created. Expected files matching data/${OUT_BASE}.osrm*"
+            ls -lh data
+            exit 1
+          fi
+
+          # OSRM v6 may not create a plain `${OUT_BASE}.osrm` file.
+          # The `.osrm` argument is still used as a base path by osrm-partition/customize/routed.
+          ls -lh "${files[@]}"
 
       - name: Partition OSRM graph
         shell: bash
@@ -92,6 +110,7 @@ jobs:
             -v "${PWD}/data:/data" \
             ghcr.io/project-osrm/osrm-backend:v6.0.0 \
             osrm-partition "/data/${{ inputs.base_name }}.osrm"
+          ls -lh data/${{ inputs.base_name }}.osrm* | tail -120
 
       - name: Customize OSRM graph
         shell: bash
@@ -101,32 +120,77 @@ jobs:
             -v "${PWD}/data:/data" \
             ghcr.io/project-osrm/osrm-backend:v6.0.0 \
             osrm-customize "/data/${{ inputs.base_name }}.osrm"
+          ls -lh data/${{ inputs.base_name }}.osrm* | tail -120
 
-      - name: Verify and stage full OSRM dataset
+      - name: Verify and stage OSRM v6 dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          BASE="${{ inputs.base_name }}"
+          files=(data/${BASE}.osrm*)
+
+          echo "OSRM dataset file count: ${#files[@]}"
+          if [ ${#files[@]} -lt 10 ]; then
+            echo "ERROR: OSRM dataset is incomplete."
+            ls -lh data
+            exit 1
+          fi
+
+          required=(
+            "${BASE}.osrm.properties"
+            "${BASE}.osrm.geometry"
+            "${BASE}.osrm.ramIndex"
+            "${BASE}.osrm.fileIndex"
+            "${BASE}.osrm.partition"
+            "${BASE}.osrm.cells"
+            "${BASE}.osrm.cell_metrics"
+          )
+
+          for required_file in "${required[@]}"; do
+            if [ ! -f "data/${required_file}" ]; then
+              echo "ERROR: Missing required OSRM v6 file: data/${required_file}"
+              ls -lh data/${BASE}.osrm* || true
+              exit 1
+            fi
+          done
+
+          cp data/${BASE}.osrm* artifact/
+          (cd artifact && sha256sum ${BASE}.osrm* > MANIFEST-SHA256.txt)
+          (cd artifact && ls -lh ${BASE}.osrm* MANIFEST-SHA256.txt | tee FILES-IN-ARTIFACT.txt)
+
+      - name: Smoke test OSRM v6 map
         shell: bash
         run: |
           set -euo pipefail
           BASE="${{ inputs.base_name }}"
+          docker rm -f osrm-smoke-test 2>/dev/null || true
+          docker run -d --name osrm-smoke-test \
+            -p 5000:5000 \
+            -v "${PWD}/data:/data" \
+            ghcr.io/project-osrm/osrm-backend:v6.0.0 \
+            osrm-routed --algorithm mld "/data/${BASE}.osrm"
 
-          echo "Required base file: data/${BASE}.osrm"
-          test -f "data/${BASE}.osrm"
+          trap 'docker logs osrm-smoke-test || true; docker rm -f osrm-smoke-test 2>/dev/null || true' EXIT
 
-          echo "Required side files: data/${BASE}.osrm.*"
-          count=$(find data -maxdepth 1 -type f -name "${BASE}.osrm.*" | wc -l)
-          echo "Side file count: ${count}"
-          if [ "${count}" -lt 5 ]; then
-            echo "ERROR: OSRM side files are missing."
-            exit 1
-          fi
+          echo "Waiting for osrm-routed..."
+          for i in $(seq 1 90); do
+            if docker logs osrm-smoke-test 2>&1 | grep -q "running and waiting for requests"; then
+              break
+            fi
+            sleep 2
+          done
 
-          cp "data/${BASE}.osrm" artifact/
-          cp data/${BASE}.osrm.* artifact/
+          docker logs osrm-smoke-test || true
 
-          (cd artifact && sha256sum ${BASE}.osrm ${BASE}.osrm.* > MANIFEST-SHA256.txt)
-          (cd artifact && ls -lh ${BASE}.osrm ${BASE}.osrm.* MANIFEST-SHA256.txt | tee FILES-IN-ARTIFACT.txt)
+          echo "Testing nearest in Ottawa..."
+          curl -fsS "http://127.0.0.1:5000/nearest/v1/driving/-75.6972,45.4215?number=1" | tee artifact/SMOKE-NEAREST-OTTAWA.json
 
-      - name: Upload complete OSRM v6 map artifact
-        uses: actions/upload-artifact@v6
+          echo "Testing route Ottawa to Toronto..."
+          curl -fsS "http://127.0.0.1:5000/route/v1/driving/-75.6972,45.4215;-79.3832,43.6532?overview=false" | tee artifact/SMOKE-ROUTE-OTTAWA-TORONTO.json
+
+      - name: Upload OSRM v6 map artifact
+        uses: actions/upload-artifact@v4
         with:
           name: osrm-v6-map-${{ inputs.base_name }}
           path: artifact/
