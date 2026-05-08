@@ -1,0 +1,165 @@
+name: Build OSRM v6.0.0 Windows Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-osrm-v6-windows.yml"
+
+jobs:
+  build-osrm-windows:
+    name: build-osrm-windows
+    runs-on: windows-2025
+    timeout-minutes: 180
+
+    env:
+      OSRM_VERSION: v6.0.0
+      BUILD_TYPE: Release
+
+    steps:
+      - name: Download OSRM v6.0.0 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (Test-Path C:\osrm-src) {
+            Remove-Item C:\osrm-src -Recurse -Force
+          }
+
+          git clone --depth 1 --branch $env:OSRM_VERSION https://github.com/Project-OSRM/osrm-backend.git C:\osrm-src
+          cd C:\osrm-src
+
+          Write-Host "OSRM source version:"
+          git describe --tags --always
+          git rev-parse HEAD
+
+      - name: Show runner and compiler info
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Runner OS: $env:ImageOS"
+          Write-Host "Runner version: $env:ImageVersion"
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          }
+
+          cmake --version
+          python --version
+
+      - name: Install Conan 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          python -m pip install --upgrade pip
+          python -m pip install "conan>=2,<3"
+
+          conan --version
+          conan profile detect --force
+
+          Write-Host "Detected Conan profile:"
+          conan profile show
+
+      - name: Configure OSRM v6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          New-Item -ItemType Directory -Force C:\osrm-src\build | Out-Null
+          cd C:\osrm-src\build
+
+          cmake `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DENABLE_CONAN=ON `
+            -DENABLE_NODE_BINDINGS=OFF `
+            -DENABLE_TESTS=OFF `
+            -DENABLE_FUZZING=OFF `
+            -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+            ..
+
+      - name: Build osrm-routed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          cd C:\osrm-src\build
+
+          cmake --build . --config $env:BUILD_TYPE --target osrm-routed --parallel
+
+      - name: Package runtime folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $runtime = Join-Path $env:GITHUB_WORKSPACE "osrm-v6.0.0-windows-x64-runtime"
+          New-Item -ItemType Directory -Force $runtime | Out-Null
+
+          $exe = Get-ChildItem C:\osrm-src\build -Recurse -Filter osrm-routed.exe |
+            Where-Object { $_.FullName -match "\\Release\\" } |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            Write-Host "Could not find osrm-routed.exe. Build tree executables:"
+            Get-ChildItem C:\osrm-src\build -Recurse -Filter *.exe | Select-Object FullName
+            throw "osrm-routed.exe not found"
+          }
+
+          Write-Host "Found osrm-routed.exe at $($exe.FullName)"
+          Copy-Item $exe.FullName $runtime -Force
+
+          Write-Host "Copying DLLs from OSRM build folder..."
+          Get-ChildItem C:\osrm-src\build -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Copy-Item $_.FullName $runtime -Force
+            }
+
+          Write-Host "Copying DLLs from Conan cache..."
+          $conanRoot = Join-Path $env:USERPROFILE ".conan2"
+          if (Test-Path $conanRoot) {
+            Get-ChildItem $conanRoot -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                Copy-Item $_.FullName $runtime -Force
+              }
+          }
+
+          $readme = @"
+OSRM v6.0.0 Windows x64 runtime
+
+Copy every file in this folder into:
+
+TransportationDesktop\osrm\
+
+Then put matching OSRM v6.0.0 map files into:
+
+TransportationDesktop\osrm\data\
+
+Example:
+
+TransportationDesktop\osrm\osrm-routed.exe
+TransportationDesktop\osrm\*.dll
+TransportationDesktop\osrm\data\canada-latest.osrm
+TransportationDesktop\osrm\data\canada-latest.osrm.*
+
+IMPORTANT:
+Do not use old v5.26.0 canada-latest.osrm* files with this v6 runtime.
+Regenerate the map files with OSRM v6.0.0.
+"@
+          Set-Content -Path (Join-Path $runtime "README_RUNTIME.txt") -Value $readme -Encoding UTF8
+
+          Write-Host "Runtime folder contents:"
+          Get-ChildItem $runtime | Sort-Object Name | Select-Object Name, Length
+
+          Write-Host "Testing osrm-routed.exe can start far enough to print version/help..."
+          & (Join-Path $runtime "osrm-routed.exe") --version
+
+      - name: Upload OSRM v6 Windows runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osrm-v6.0.0-windows-x64-runtime
+          path: osrm-v6.0.0-windows-x64-runtime
+          if-no-files-found: error
+          compression-level: 6
