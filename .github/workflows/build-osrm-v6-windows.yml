@@ -63,6 +63,27 @@ jobs:
           Write-Host "Detected Conan profile:"
           conan profile show
 
+      - name: Patch OSRM v6 Conan options for oneTBB on Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $cmakeFile = "C:\osrm-src\CMakeLists.txt"
+          $text = Get-Content -Raw $cmakeFile
+
+          if ($text -notmatch "hwloc/\*:shared=True") {
+            $patched = $text -replace "(--settings\s+build_type=\$\{CMAKE_BUILD_TYPE\})", "`$1 --options=hwloc/*:shared=True"
+            if ($patched -eq $text) {
+              Write-Host "Could not find Conan build_type setting to patch. Relevant CMake snippet:"
+              Select-String -Path $cmakeFile -Pattern "conan|build_type|compiler.cppstd|execute_process" -Context 2,2
+              throw "Failed to patch OSRM Conan command"
+            }
+            Set-Content -Path $cmakeFile -Value $patched -Encoding UTF8
+          }
+
+          Write-Host "Patched Conan command lines:"
+          Select-String -Path $cmakeFile -Pattern "conan|hwloc|build_type|compiler.cppstd" -Context 1,1
+
       - name: Configure OSRM v6
         shell: pwsh
         run: |
