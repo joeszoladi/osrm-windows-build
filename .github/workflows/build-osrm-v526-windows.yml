@@ -111,9 +111,45 @@ jobs:
           $text = $text -replace "(?m)^\s*zlib\s*$", ""
           $text = $text -replace "(?m)^\s*bzip2\s*$", ""
 
-          # Do not generate the old pkg-config file. It uses TARGET_LINKER_FILE on Boost targets,
-          # which modern vcpkg/CMake imported Boost targets do not expose as real libraries.
-          $text = $text -replace "(?s)configure_file\([^\)]*libosrm\.pc\.in[^\)]*\)", "# patched out for GitHub Actions Windows runtime build"
+          # Do not generate/install the old pkg-config file. OSRM v5.26's libosrm.pc path
+          # can evaluate TARGET_LINKER_FILE on modern Boost imported targets, which breaks configure.
+          # Remove the configure_file(...) block only if that block references libosrm.pc.in.
+          $lines = $text -split "`r?`n"
+          $outLines = New-Object System.Collections.Generic.List[string]
+          $buffer = New-Object System.Collections.Generic.List[string]
+          $insideConfigureFile = $false
+          $parenDepth = 0
+          foreach ($line in $lines) {
+            if (-not $insideConfigureFile -and $line -match "configure_file\s*\(") {
+              $insideConfigureFile = $true
+              $buffer.Clear()
+              $parenDepth = 0
+            }
+
+            if ($insideConfigureFile) {
+              $buffer.Add($line)
+              $parenDepth += ([regex]::Matches($line, "\(")).Count
+              $parenDepth -= ([regex]::Matches($line, "\)")).Count
+              if ($parenDepth -le 0) {
+                $block = ($buffer -join "`r`n")
+                if ($block -match "libosrm\.pc\.in") {
+                  $outLines.Add("# patched out: configure_file libosrm.pc.in for GitHub Actions Windows runtime build")
+                } else {
+                  foreach ($b in $buffer) { $outLines.Add($b) }
+                }
+                $insideConfigureFile = $false
+              }
+              continue
+            }
+
+            if ($line -match "libosrm\.pc") {
+              $outLines.Add("# patched out: $line")
+              continue
+            }
+
+            $outLines.Add($line)
+          }
+          $text = $outLines -join "`r`n"
 
           # Do not configure tests/benchmarks. We only need osrm-routed.exe for the app runtime.
           $text = $text -replace "(?m)^\s*add_subdirectory\(unit_tests\)\s*$", "# patched out: add_subdirectory(unit_tests)"
@@ -163,9 +199,10 @@ jobs:
           # Include the compatibility module near the top after project() if possible.
           $text = Get-Content $cmakeFile -Raw
           if ($text -notmatch "github-actions-compat.cmake") {
-            $text = $text -replace "(?m)^(project\([^\r\n]+\)\s*)$", "`$1`r`ninclude(\`${CMAKE_CURRENT_SOURCE_DIR}/cmake/github-actions-compat.cmake\`)"
+            $includeLine = 'include("C:/osrm-src/cmake/github-actions-compat.cmake")'
+            $text = $text -replace "(?m)^(project\([^\r\n]+\)\s*)$", ('$1' + "`r`n" + $includeLine)
             if ($text -notmatch "github-actions-compat.cmake") {
-              $text = "include(\`${CMAKE_CURRENT_SOURCE_DIR}/cmake/github-actions-compat.cmake\`)`r`n" + $text
+              $text = $includeLine + "`r`n" + $text
             }
             Set-Content $cmakeFile $text -Encoding UTF8
           }
