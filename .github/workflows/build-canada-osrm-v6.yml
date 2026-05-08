@@ -163,6 +163,8 @@ jobs:
         run: |
           set -euxo pipefail
 
+          docker rm -f osrm-canada-test || true
+
           docker run -d \
             --name osrm-canada-test \
             -p 5000:5000 \
@@ -180,6 +182,18 @@ jobs:
           docker logs osrm-canada-test
 
           docker stop osrm-canada-test
+          docker rm osrm-canada-test
+
+      - name: Fix OSRM file permissions
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo chown -R "$USER:$USER" work dist
+          sudo find work -type d -exec chmod 755 {} \;
+          sudo find work -type f -exec chmod 644 {} \;
+
+          ls -lh work | head -50
 
       - name: Package OSRM map files
         shell: bash
@@ -188,7 +202,7 @@ jobs:
 
           cd work
 
-          tar --use-compress-program="zstd -T0 -19" \
+          tar --use-compress-program="zstd -T0 -10" \
             -cf ../dist/canada-osrm-v6-mld.tar.zst \
             canada-latest.osrm*
 
