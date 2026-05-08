@@ -14,7 +14,6 @@ jobs:
 
     env:
       OSRM_VERSION: v6.0.0
-      BUILD_TYPE: Release
 
     steps:
       - name: Download OSRM v6.0.0 source
@@ -43,6 +42,7 @@ jobs:
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (Test-Path $vswhere) {
+            Write-Host "Visual Studio installation path:"
             & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           }
 
@@ -68,18 +68,26 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
+          $buildType = "Release"
+
           New-Item -ItemType Directory -Force C:\osrm-src\build | Out-Null
           cd C:\osrm-src\build
 
-          cmake `
-            -G "Visual Studio 17 2022" `
-            -A x64 `
-            -DENABLE_CONAN=ON `
-            -DENABLE_NODE_BINDINGS=OFF `
-            -DENABLE_TESTS=OFF `
-            -DENABLE_FUZZING=OFF `
-            -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
-            ..
+          $cmakeArgs = @(
+            "-G", "Visual Studio 17 2022",
+            "-A", "x64",
+            "-DENABLE_CONAN=ON",
+            "-DENABLE_NODE_BINDINGS=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_FUZZING=OFF",
+            "-DCMAKE_BUILD_TYPE=$buildType",
+            ".."
+          )
+
+          Write-Host "Running cmake configure with args:"
+          $cmakeArgs | ForEach-Object { Write-Host "  $_" }
+
+          cmake @cmakeArgs
 
       - name: Build osrm-routed
         shell: pwsh
@@ -87,8 +95,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           cd C:\osrm-src\build
-
-          cmake --build . --config $env:BUILD_TYPE --target osrm-routed --parallel
+          cmake --build . --config Release --target osrm-routed --parallel
 
       - name: Package runtime folder
         shell: pwsh
@@ -127,25 +134,25 @@ jobs:
           }
 
           $readmeLines = @(
-            "OSRM v6.0.0 Windows x64 runtime"
-            ""
-            "Copy every file in this folder into:"
-            ""
-            "TransportationDesktop\osrm\"
-            ""
-            "Then put matching OSRM v6.0.0 map files into:"
-            ""
-            "TransportationDesktop\osrm\data\"
-            ""
-            "Example:"
-            ""
-            "TransportationDesktop\osrm\osrm-routed.exe"
-            "TransportationDesktop\osrm\*.dll"
-            "TransportationDesktop\osrm\data\canada-latest.osrm"
-            "TransportationDesktop\osrm\data\canada-latest.osrm.*"
-            ""
-            "IMPORTANT:"
-            "Do not use old v5.26.0 canada-latest.osrm* files with this v6 runtime."
+            "OSRM v6.0.0 Windows x64 runtime",
+            "",
+            "Copy every file in this folder into:",
+            "",
+            "TransportationDesktop\osrm\",
+            "",
+            "Then put matching OSRM v6.0.0 map files into:",
+            "",
+            "TransportationDesktop\osrm\data\",
+            "",
+            "Example:",
+            "",
+            "TransportationDesktop\osrm\osrm-routed.exe",
+            "TransportationDesktop\osrm\*.dll",
+            "TransportationDesktop\osrm\data\canada-latest.osrm",
+            "TransportationDesktop\osrm\data\canada-latest.osrm.*",
+            "",
+            "IMPORTANT:",
+            "Do not use old v5.26.0 canada-latest.osrm* files with this v6 runtime.",
             "Regenerate the map files with OSRM v6.0.0."
           )
           $readme = $readmeLines -join [Environment]::NewLine
