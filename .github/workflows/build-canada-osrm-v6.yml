@@ -155,7 +155,13 @@ jobs:
             fi
           done
 
-          cp data/${BASE}.osrm* artifact/
+          # Docker creates the OSRM files as root. Some v6 files can be unreadable
+          # by the GitHub runner user, which breaks staging/upload unless we fix perms.
+          sudo chmod a+r data/${BASE}.osrm*
+          sudo chown $(id -u):$(id -g) data/${BASE}.osrm*
+
+          cp -a data/${BASE}.osrm* artifact/
+          chmod a+r artifact/${BASE}.osrm*
           (cd artifact && sha256sum ${BASE}.osrm* > MANIFEST-SHA256.txt)
           (cd artifact && ls -lh ${BASE}.osrm* MANIFEST-SHA256.txt | tee FILES-IN-ARTIFACT.txt)
 
