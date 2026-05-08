@@ -126,28 +126,29 @@ jobs:
               }
           }
 
-          $readme = @"
-OSRM v6.0.0 Windows x64 runtime
-
-Copy every file in this folder into:
-
-TransportationDesktop\osrm\
-
-Then put matching OSRM v6.0.0 map files into:
-
-TransportationDesktop\osrm\data\
-
-Example:
-
-TransportationDesktop\osrm\osrm-routed.exe
-TransportationDesktop\osrm\*.dll
-TransportationDesktop\osrm\data\canada-latest.osrm
-TransportationDesktop\osrm\data\canada-latest.osrm.*
-
-IMPORTANT:
-Do not use old v5.26.0 canada-latest.osrm* files with this v6 runtime.
-Regenerate the map files with OSRM v6.0.0.
-"@
+          $readmeLines = @(
+            "OSRM v6.0.0 Windows x64 runtime"
+            ""
+            "Copy every file in this folder into:"
+            ""
+            "TransportationDesktop\osrm\"
+            ""
+            "Then put matching OSRM v6.0.0 map files into:"
+            ""
+            "TransportationDesktop\osrm\data\"
+            ""
+            "Example:"
+            ""
+            "TransportationDesktop\osrm\osrm-routed.exe"
+            "TransportationDesktop\osrm\*.dll"
+            "TransportationDesktop\osrm\data\canada-latest.osrm"
+            "TransportationDesktop\osrm\data\canada-latest.osrm.*"
+            ""
+            "IMPORTANT:"
+            "Do not use old v5.26.0 canada-latest.osrm* files with this v6 runtime."
+            "Regenerate the map files with OSRM v6.0.0."
+          )
+          $readme = $readmeLines -join [Environment]::NewLine
           Set-Content -Path (Join-Path $runtime "README_RUNTIME.txt") -Value $readme -Encoding UTF8
 
           Write-Host "Runtime folder contents:"
