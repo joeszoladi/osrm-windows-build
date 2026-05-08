@@ -50,26 +50,50 @@ jobs:
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
 
           # OSRM v5.26.0 needs Boost, zlib, bzip2, expat, and Lua.
+          # Current vcpkg does NOT have separate boost-zlib / boost-bzip2 ports.
+          # Those are features on boost-iostreams instead.
           # TBB is installed separately below because current oneTBB removed old headers used by OSRM 5.26.
-          & "$env:VCPKG_ROOT\vcpkg.exe" install `
-            boost-date-time:x64-windows `
-            boost-chrono:x64-windows `
-            boost-filesystem:x64-windows `
-            boost-iostreams:x64-windows `
-            boost-program-options:x64-windows `
-            boost-regex:x64-windows `
-            boost-system:x64-windows `
-            boost-thread:x64-windows `
-            boost-test:x64-windows `
-            boost-zlib:x64-windows `
-            boost-bzip2:x64-windows `
-            zlib:x64-windows `
-            bzip2:x64-windows `
-            expat:x64-windows `
-            lua:x64-windows
+          $packages = @(
+            "boost-date-time:x64-windows",
+            "boost-chrono:x64-windows",
+            "boost-filesystem:x64-windows",
+            "boost-iostreams[zlib,bzip2]:x64-windows",
+            "boost-program-options:x64-windows",
+            "boost-regex:x64-windows",
+            "boost-system:x64-windows",
+            "boost-thread:x64-windows",
+            "boost-test:x64-windows",
+            "zlib:x64-windows",
+            "bzip2:x64-windows",
+            "expat:x64-windows",
+            "lua:x64-windows"
+          )
+          & "$env:VCPKG_ROOT\vcpkg.exe" install @packages
 
           Write-Host "Installed Boost CMake config packages:"
-          Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows\share" -Directory | Where-Object { $_.Name -like "boost*" } | Sort-Object Name | Select-Object Name | Format-Table -AutoSize
+          if (Test-Path "$env:VCPKG_ROOT\installed\x64-windows\share") {
+            Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows\share" -Directory | Where-Object { $_.Name -like "boost*" } | Sort-Object Name | Select-Object Name | Format-Table -AutoSize
+          }
+
+      - name: Patch OSRM v5.26 CMake for modern vcpkg Boost/Lua
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cmakeFile = Join-Path $env:OSRM_SOURCE_DIR "CMakeLists.txt"
+          $txt = Get-Content $cmakeFile -Raw
+
+          # OSRM 5.26's MSVC path adds a Boost "zlib" component.
+          # Modern vcpkg exposes zlib through boost-iostreams[zlib] + zlib.lib,
+          # not as a separate boost_zlib package/config.
+          $txt = $txt.Replace('set(BOOST_COMPONENTS ${BOOST_COMPONENTS} zlib)', '# Removed obsolete Boost zlib component for modern vcpkg. zlib is linked separately below.')
+
+          # Modern vcpkg no longer provides old Lua 5.2 as the default lua port.
+          # osrm-routed does not need Lua at runtime; this keeps configure moving.
+          $txt = $txt.Replace('find_package(Lua 5.2 REQUIRED)', 'find_package(Lua REQUIRED)')
+
+          Set-Content $cmakeFile $txt -NoNewline
+          Write-Host "Patched CMakeLists.txt lines:"
+          Select-String -Path $cmakeFile -Pattern "BOOST_COMPONENTS|find_package\(Lua" | ForEach-Object { $_.Line }
 
       - name: Build old TBB 2020.2 for OSRM v5.26
         shell: pwsh
@@ -189,6 +213,6 @@ jobs:
       - name: Upload OSRM Windows runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: osrm-v5.26.0-windows-x64-runtime-vcpkg
+          name: osrm-v5.26.0-windows-x64-runtime-vcpkg-v5
           path: C:\osrm-runtime\*
           if-no-files-found: error
