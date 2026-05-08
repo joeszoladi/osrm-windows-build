@@ -3,33 +3,35 @@ name: Build OSRM v5.26.0 Windows Runtime
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-osrm-windows:
     runs-on: windows-2022
     timeout-minutes: 120
 
     steps:
-      - name: Checkout OSRM v5.26.0
-        uses: actions/checkout@v4
-        with:
-          repository: Project-OSRM/osrm-backend
-          ref: v5.26.0
-
-      - name: Install VS2019 v142 build tools into VS2022
+      - name: Download OSRM v5.26.0 source
         shell: pwsh
         run: |
-          $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
-          $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
-          if (!(Test-Path $vsInstaller)) { throw "Visual Studio Installer not found: $vsInstaller" }
-          if (!(Test-Path $vsPath)) { throw "Visual Studio 2022 Enterprise not found: $vsPath" }
+          $ErrorActionPreference = "Stop"
+          git --version
+          git clone --depth 1 --branch v5.26.0 https://github.com/Project-OSRM/osrm-backend.git .
+          git rev-parse --short HEAD
 
-          & $vsInstaller modify `
-            --installPath $vsPath `
-            --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 `
-            --quiet `
-            --norestart `
-            --nocache `
-            --wait
+      - name: Show runner and Visual Studio info
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "OS:" (Get-CimInstance Win32_OperatingSystem).Caption
+          Write-Host "Processor count:" $env:NUMBER_OF_PROCESSORS
+          $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          & $vswhere -all -products * -format table
+          & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          cmake --version
+          7z
 
       - name: Download OSRM v5.26 Windows dependency package
         shell: pwsh
@@ -37,9 +39,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           $url = "http://project-osrm.wolt.com/windows-build-deps/osrm-deps-win-x64-14.2-2019.01.7z"
           $out = "osrm-deps-win-x64-14.2-2019.01.7z"
-          Invoke-WebRequest $url -OutFile $out
+          Write-Host "Downloading $url"
+          Invoke-WebRequest $url -OutFile $out -UseBasicParsing
+          if (!(Test-Path $out)) { throw "Dependency package did not download" }
+          Write-Host "Downloaded bytes:" (Get-Item $out).Length
           7z x $out -y
           if (!(Test-Path "osrm-deps\lib")) { throw "osrm-deps did not extract correctly" }
+          Write-Host "Dependency DLLs found:"
+          Get-ChildItem "osrm-deps\lib\*.dll" -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
 
       - name: Configure OSRM
         shell: pwsh
@@ -78,7 +85,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Set-Location build
-          cmake --build . --config Release --target osrm-routed -- /m
+          cmake --build . --config Release --target osrm-routed -- /m /verbosity:minimal
 
       - name: Package runtime folder
         shell: pwsh
@@ -91,17 +98,14 @@ jobs:
           if (!$exe) { throw "osrm-routed.exe was not found after build" }
           Copy-Item $exe.FullName $dist -Force
 
-          # Runtime dependency DLLs from the OSRM prebuilt dependency package.
           Copy-Item "osrm-deps\lib\*.dll" $dist -Force -ErrorAction SilentlyContinue
 
-          # Visual C++ runtime DLLs commonly needed when running the EXE on a normal Windows install.
           $vcRuntimeNames = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "concrt140.dll")
           foreach ($name in $vcRuntimeNames) {
             $src = Join-Path $env:WINDIR "System32\$name"
             if (Test-Path $src) { Copy-Item $src $dist -Force }
           }
 
-          # Write a manifest so you can see exactly what was included.
           Get-ChildItem $dist | Sort-Object Name | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Set-Content (Join-Path $dist "RUNTIME_FILES.txt")
           Get-ChildItem $dist | Sort-Object Name | ForEach-Object { $_.Name }
 
