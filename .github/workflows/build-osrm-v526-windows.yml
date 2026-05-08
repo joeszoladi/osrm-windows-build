@@ -122,41 +122,41 @@ jobs:
 
           # Compatibility CMake module for old OSRM + modern vcpkg imported targets.
           $compat = @'
-message(STATUS "Applying OSRM 5.26 Windows compatibility targets")
-find_package(Threads REQUIRED)
-find_package(ZLIB REQUIRED)
-find_package(BZip2 REQUIRED)
-
-if(NOT TARGET Boost::zlib)
-  add_library(Boost::zlib INTERFACE IMPORTED)
-  target_link_libraries(Boost::zlib INTERFACE ZLIB::ZLIB)
-endif()
-if(NOT TARGET Boost::bzip2)
-  add_library(Boost::bzip2 INTERFACE IMPORTED)
-  target_link_libraries(Boost::bzip2 INTERFACE BZip2::BZip2)
-endif()
-if(NOT TARGET boost_zlib)
-  add_library(boost_zlib INTERFACE IMPORTED)
-  target_link_libraries(boost_zlib INTERFACE ZLIB::ZLIB)
-endif()
-if(NOT TARGET boost_bzip2)
-  add_library(boost_bzip2 INTERFACE IMPORTED)
-  target_link_libraries(boost_bzip2 INTERFACE BZip2::BZip2)
-endif()
-
-if(NOT TARGET TBB::tbb AND DEFINED TBB_LIBRARY AND DEFINED TBB_INCLUDE_DIR)
-  add_library(TBB::tbb UNKNOWN IMPORTED)
-  set_target_properties(TBB::tbb PROPERTIES
-    IMPORTED_LOCATION "${TBB_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${TBB_INCLUDE_DIR}")
-endif()
-if(NOT TARGET TBB::tbbmalloc AND DEFINED TBB_MALLOC_LIBRARY AND DEFINED TBB_INCLUDE_DIR)
-  add_library(TBB::tbbmalloc UNKNOWN IMPORTED)
-  set_target_properties(TBB::tbbmalloc PROPERTIES
-    IMPORTED_LOCATION "${TBB_MALLOC_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${TBB_INCLUDE_DIR}")
-endif()
-'@
+          message(STATUS "Applying OSRM 5.26 Windows compatibility targets")
+          find_package(Threads REQUIRED)
+          find_package(ZLIB REQUIRED)
+          find_package(BZip2 REQUIRED)
+          
+          if(NOT TARGET Boost::zlib)
+            add_library(Boost::zlib INTERFACE IMPORTED)
+            target_link_libraries(Boost::zlib INTERFACE ZLIB::ZLIB)
+          endif()
+          if(NOT TARGET Boost::bzip2)
+            add_library(Boost::bzip2 INTERFACE IMPORTED)
+            target_link_libraries(Boost::bzip2 INTERFACE BZip2::BZip2)
+          endif()
+          if(NOT TARGET boost_zlib)
+            add_library(boost_zlib INTERFACE IMPORTED)
+            target_link_libraries(boost_zlib INTERFACE ZLIB::ZLIB)
+          endif()
+          if(NOT TARGET boost_bzip2)
+            add_library(boost_bzip2 INTERFACE IMPORTED)
+            target_link_libraries(boost_bzip2 INTERFACE BZip2::BZip2)
+          endif()
+          
+          if(NOT TARGET TBB::tbb AND DEFINED TBB_LIBRARY AND DEFINED TBB_INCLUDE_DIR)
+            add_library(TBB::tbb UNKNOWN IMPORTED)
+            set_target_properties(TBB::tbb PROPERTIES
+              IMPORTED_LOCATION "${TBB_LIBRARY}"
+              INTERFACE_INCLUDE_DIRECTORIES "${TBB_INCLUDE_DIR}")
+          endif()
+          if(NOT TARGET TBB::tbbmalloc AND DEFINED TBB_MALLOC_LIBRARY AND DEFINED TBB_INCLUDE_DIR)
+            add_library(TBB::tbbmalloc UNKNOWN IMPORTED)
+            set_target_properties(TBB::tbbmalloc PROPERTIES
+              IMPORTED_LOCATION "${TBB_MALLOC_LIBRARY}"
+              INTERFACE_INCLUDE_DIRECTORIES "${TBB_INCLUDE_DIR}")
+          endif()
+          '@
           Set-Content "C:\osrm-src\cmake\github-actions-compat.cmake" $compat -Encoding UTF8
 
           # Include the compatibility module near the top after project() if possible.
@@ -234,12 +234,13 @@ endif()
           Copy-Item C:\vcpkg\installed\x64-windows\bin\*.dll C:\osrm-runtime\ -Force -ErrorAction SilentlyContinue
           Copy-Item C:\tbb-install\bin\*.dll C:\osrm-runtime\ -Force -ErrorAction SilentlyContinue
 
-          @"
-OSRM Windows runtime built by GitHub Actions.
-Version: v5.26.0
-Copy every file in this artifact into TransportationDesktop\osrm\
-Then put canada-latest.osrm* into TransportationDesktop\osrm\data\
-"@ | Set-Content C:\osrm-runtime\RUNTIME_FILES.txt -Encoding UTF8
+          $runtimeReadme = @"
+          OSRM Windows runtime built by GitHub Actions.
+          Version: v5.26.0
+          Copy every file in this artifact into TransportationDesktop\osrm\
+          Then put canada-latest.osrm* into TransportationDesktop\osrm\data\
+          "@
+          Set-Content C:\osrm-runtime\RUNTIME_FILES.txt $runtimeReadme -Encoding UTF8
 
           Get-ChildItem C:\osrm-runtime | Select-Object Name,Length
 
