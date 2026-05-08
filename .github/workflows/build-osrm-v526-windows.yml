@@ -6,224 +6,246 @@ on:
 jobs:
   build-osrm-windows:
     runs-on: windows-2022
-    timeout-minutes: 180
-
-    env:
-      OSRM_VERSION: v5.26.0
-      BUILD_CONFIGURATION: Release
-      VCPKG_ROOT: C:\vcpkg
-      VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows
-      OSRM_SOURCE_DIR: C:\osrm-src
-      OSRM_BUILD_DIR: C:\osrm-build
-      OSRM_RUNTIME_DIR: C:\osrm-runtime
-      TBB_ROOT: C:\osrm-tbb-2020.2
 
     steps:
-      - name: Show runner and tool info
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "Runner OS: $env:RUNNER_OS"
-          Write-Host "OSRM version: $env:OSRM_VERSION"
-          Write-Host "Visual Studio installs:"
-          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -format table
-          git --version
-          cmake --version
-
       - name: Download OSRM v5.26.0 source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path $env:OSRM_SOURCE_DIR) { Remove-Item $env:OSRM_SOURCE_DIR -Recurse -Force }
-          git clone --depth 1 --branch $env:OSRM_VERSION https://github.com/Project-OSRM/osrm-backend.git $env:OSRM_SOURCE_DIR
-          Push-Location $env:OSRM_SOURCE_DIR
+          git clone --branch v5.26.0 --depth 1 https://github.com/Project-OSRM/osrm-backend.git C:\osrm-src
+          cd C:\osrm-src
           git rev-parse HEAD
-          Pop-Location
+
+      - name: Show runner and Visual Studio info
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Runner OS: $env:RUNNER_OS"
+          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -property installationPath
+          cmake --version
+          git --version
 
       - name: Install vcpkg dependencies except old TBB
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path $env:VCPKG_ROOT) { Remove-Item $env:VCPKG_ROOT -Recurse -Force }
-          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+          $env:VCPKG_ROOT = "C:\vcpkg"
+          C:\vcpkg\vcpkg.exe version
 
-          # OSRM v5.26.0 needs Boost, zlib, bzip2, expat, and Lua.
-          # Current vcpkg does NOT have separate boost-zlib / boost-bzip2 ports.
-          # Those are features on boost-iostreams instead.
-          # TBB is installed separately below because current oneTBB removed old headers used by OSRM 5.26.
-          $packages = @(
-            "boost-date-time:x64-windows",
-            "boost-chrono:x64-windows",
-            "boost-filesystem:x64-windows",
-            "boost-iostreams[zlib,bzip2]:x64-windows",
-            "boost-program-options:x64-windows",
-            "boost-regex:x64-windows",
-            "boost-system:x64-windows",
-            "boost-thread:x64-windows",
-            "boost-test:x64-windows",
-            "zlib:x64-windows",
-            "bzip2:x64-windows",
-            "expat:x64-windows",
-            "lua:x64-windows"
-          )
-          & "$env:VCPKG_ROOT\vcpkg.exe" install @packages
+          # OSRM 5.26 is old. These are the modern vcpkg ports/features needed to satisfy
+          # its older CMake files as closely as possible.
+          C:\vcpkg\vcpkg.exe install --triplet x64-windows `
+            boost-algorithm `
+            boost-align `
+            boost-assert `
+            boost-chrono `
+            boost-date-time `
+            boost-filesystem `
+            boost-foreach `
+            boost-geometry `
+            boost-iostreams[zlib,bzip2] `
+            boost-lexical-cast `
+            boost-math `
+            boost-program-options `
+            boost-regex `
+            boost-system `
+            boost-thread `
+            boost-uuid `
+            boost-variant `
+            bzip2 `
+            expat `
+            gtest `
+            libosmium `
+            lua `
+            luabind `
+            protozero `
+            stxxl `
+            zlib
 
-          Write-Host "Installed Boost CMake config packages:"
-          if (Test-Path "$env:VCPKG_ROOT\installed\x64-windows\share") {
-            Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows\share" -Directory | Where-Object { $_.Name -like "boost*" } | Sort-Object Name | Select-Object Name | Format-Table -AutoSize
-          }
-
-      - name: Patch OSRM v5.26 CMake for modern vcpkg Boost/Lua
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $cmakeFile = Join-Path $env:OSRM_SOURCE_DIR "CMakeLists.txt"
-          $txt = Get-Content $cmakeFile -Raw
-
-          # OSRM 5.26's MSVC path adds a Boost "zlib" component.
-          # Modern vcpkg exposes zlib through boost-iostreams[zlib] + zlib.lib,
-          # not as a separate boost_zlib package/config.
-          $txt = $txt.Replace('set(BOOST_COMPONENTS ${BOOST_COMPONENTS} zlib)', '# Removed obsolete Boost zlib component for modern vcpkg. zlib is linked separately below.')
-
-          # Modern vcpkg no longer provides old Lua 5.2 as the default lua port.
-          # osrm-routed does not need Lua at runtime; this keeps configure moving.
-          $txt = $txt.Replace('find_package(Lua 5.2 REQUIRED)', 'find_package(Lua REQUIRED)')
-
-          # OSRM v5.26 tries to write Boost imported targets into libosrm.pc using
-          # $<TARGET_LINKER_FILE:Boost::...>. Modern vcpkg/CMake may expose Boost
-          # imported targets in a way that cannot be used with TARGET_LINKER_FILE,
-          # and we do not need the pkg-config file for the Windows runtime.
-          $txt = [regex]::Replace(
-            $txt,
-            'foreach\(engine_lib \$\{ENGINE_LIBRARIES\}\).*?endforeach\(engine_lib\)',
-            "foreach(engine_lib `${ENGINE_LIBRARIES})`n  list(APPEND PKGCONFIG_DEPENDENT_LIBRARIES `"`${engine_lib}`")`nendforeach(engine_lib)",
-            [System.Text.RegularExpressions.RegexOptions]::Singleline
-          )
-
-          Set-Content $cmakeFile $txt -NoNewline
-          Write-Host "Patched CMakeLists.txt lines:"
-          Select-String -Path $cmakeFile -Pattern "BOOST_COMPONENTS|find_package\(Lua" | ForEach-Object { $_.Line }
+          Write-Host "Installed vcpkg packages:"
+          C:\vcpkg\vcpkg.exe list
+          Write-Host "Installed share folders:"
+          Get-ChildItem "C:\vcpkg\installed\x64-windows\share" -Directory | Select-Object -ExpandProperty Name | Sort-Object
 
       - name: Build old TBB 2020.2 for OSRM v5.26
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $zip = "C:\oneTBB-v2020.2.zip"
-          $src = "C:\oneTBB-2020.2-src"
-          if (Test-Path $src) { Remove-Item $src -Recurse -Force }
-          if (Test-Path $env:TBB_ROOT) { Remove-Item $env:TBB_ROOT -Recurse -Force }
-          New-Item -ItemType Directory -Path $env:TBB_ROOT | Out-Null
-          Invoke-WebRequest "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2020.2.zip" -OutFile $zip -UseBasicParsing
-          Expand-Archive $zip -DestinationPath C:\ -Force
-          Rename-Item "C:\oneTBB-2020.2" $src
+          git clone --branch 2020_U2 --depth 1 https://github.com/oneapi-src/oneTBB.git C:\tbb-src
+          cd C:\tbb-src
 
-          $solution = Join-Path $src "build\vs2013\makefile.sln"
-          if (!(Test-Path $solution)) { throw "Could not find TBB solution: $solution" }
+          # Old TBB uses makefiles. Use the Visual Studio environment supplied by the runner.
+          $vsPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "Visual Studio with VC tools was not found." }
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat was not found at $vcvars" }
 
-          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
-          if (!$msbuild) { throw "MSBuild.exe not found" }
+          cmd /c "`"$vcvars`" && cd /d C:\tbb-src && mingw32-make compiler=cl arch=intel64 runtime=vc14"
 
-          & $msbuild $solution /nologo /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
-          if ($LASTEXITCODE -ne 0) { throw "TBB build failed" }
+          $tbbBuild = Get-ChildItem C:\tbb-src\build -Directory | Where-Object { $_.Name -like "windows_intel64*release*" } | Select-Object -First 1
+          if (-not $tbbBuild) { throw "Could not find old TBB release build folder." }
 
-          New-Item -ItemType Directory -Force -Path "$env:TBB_ROOT\include" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$env:TBB_ROOT\lib" | Out-Null
-          Copy-Item "$src\include\*" "$env:TBB_ROOT\include" -Recurse -Force
+          New-Item -ItemType Directory -Force C:\tbb-install\include | Out-Null
+          New-Item -ItemType Directory -Force C:\tbb-install\lib | Out-Null
+          New-Item -ItemType Directory -Force C:\tbb-install\bin | Out-Null
 
-          $tbbLibs = Get-ChildItem $src -Recurse -Include tbb.lib,tbbmalloc.lib,tbb.dll,tbbmalloc.dll | Where-Object { $_.FullName -match "x64" -and $_.FullName -match "Release" }
-          if (!$tbbLibs) { throw "No TBB lib/dll files found after build" }
-          $tbbLibs | ForEach-Object { Copy-Item $_.FullName "$env:TBB_ROOT\lib\" -Force }
-          Get-ChildItem "$env:TBB_ROOT\lib" | Format-Table Name,Length
+          Copy-Item C:\tbb-src\include\* C:\tbb-install\include\ -Recurse -Force
+          Copy-Item "$($tbbBuild.FullName)\*.lib" C:\tbb-install\lib\ -Force
+          Copy-Item "$($tbbBuild.FullName)\*.dll" C:\tbb-install\bin\ -Force
+
+          Write-Host "TBB build folder: $($tbbBuild.FullName)"
+          Get-ChildItem C:\tbb-install -Recurse | Select-Object FullName
+
+      - name: Patch OSRM v5.26 CMake for modern GitHub runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cmakeFile = "C:\osrm-src\CMakeLists.txt"
+          $text = Get-Content $cmakeFile -Raw
+
+          # Old OSRM asks Boost to find old zlib/bzip2 pseudo-components.
+          # Modern vcpkg exposes these through boost-iostreams features instead.
+          $text = $text -replace "(?m)^\s*zlib\s*$", ""
+          $text = $text -replace "(?m)^\s*bzip2\s*$", ""
+
+          # Do not generate the old pkg-config file. It uses TARGET_LINKER_FILE on Boost targets,
+          # which modern vcpkg/CMake imported Boost targets do not expose as real libraries.
+          $text = $text -replace "(?s)configure_file\([^\)]*libosrm\.pc\.in[^\)]*\)", "# patched out for GitHub Actions Windows runtime build"
+
+          # Do not configure tests/benchmarks. We only need osrm-routed.exe for the app runtime.
+          $text = $text -replace "(?m)^\s*add_subdirectory\(unit_tests\)\s*$", "# patched out: add_subdirectory(unit_tests)"
+          $text = $text -replace "(?m)^\s*add_subdirectory\(src/benchmarks\)\s*$", "# patched out: add_subdirectory(src/benchmarks)"
+
+          Set-Content $cmakeFile $text -Encoding UTF8
+
+          # Compatibility CMake module for old OSRM + modern vcpkg imported targets.
+          $compat = @'
+message(STATUS "Applying OSRM 5.26 Windows compatibility targets")
+find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(BZip2 REQUIRED)
+
+if(NOT TARGET Boost::zlib)
+  add_library(Boost::zlib INTERFACE IMPORTED)
+  target_link_libraries(Boost::zlib INTERFACE ZLIB::ZLIB)
+endif()
+if(NOT TARGET Boost::bzip2)
+  add_library(Boost::bzip2 INTERFACE IMPORTED)
+  target_link_libraries(Boost::bzip2 INTERFACE BZip2::BZip2)
+endif()
+if(NOT TARGET boost_zlib)
+  add_library(boost_zlib INTERFACE IMPORTED)
+  target_link_libraries(boost_zlib INTERFACE ZLIB::ZLIB)
+endif()
+if(NOT TARGET boost_bzip2)
+  add_library(boost_bzip2 INTERFACE IMPORTED)
+  target_link_libraries(boost_bzip2 INTERFACE BZip2::BZip2)
+endif()
+
+if(NOT TARGET TBB::tbb AND DEFINED TBB_LIBRARY AND DEFINED TBB_INCLUDE_DIR)
+  add_library(TBB::tbb UNKNOWN IMPORTED)
+  set_target_properties(TBB::tbb PROPERTIES
+    IMPORTED_LOCATION "${TBB_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TBB_INCLUDE_DIR}")
+endif()
+if(NOT TARGET TBB::tbbmalloc AND DEFINED TBB_MALLOC_LIBRARY AND DEFINED TBB_INCLUDE_DIR)
+  add_library(TBB::tbbmalloc UNKNOWN IMPORTED)
+  set_target_properties(TBB::tbbmalloc PROPERTIES
+    IMPORTED_LOCATION "${TBB_MALLOC_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TBB_INCLUDE_DIR}")
+endif()
+'@
+          Set-Content "C:\osrm-src\cmake\github-actions-compat.cmake" $compat -Encoding UTF8
+
+          # Include the compatibility module near the top after project() if possible.
+          $text = Get-Content $cmakeFile -Raw
+          if ($text -notmatch "github-actions-compat.cmake") {
+            $text = $text -replace "(?m)^(project\([^\r\n]+\)\s*)$", "`$1`r`ninclude(\`${CMAKE_CURRENT_SOURCE_DIR}/cmake/github-actions-compat.cmake\`)"
+            if ($text -notmatch "github-actions-compat.cmake") {
+              $text = "include(\`${CMAKE_CURRENT_SOURCE_DIR}/cmake/github-actions-compat.cmake\`)`r`n" + $text
+            }
+            Set-Content $cmakeFile $text -Encoding UTF8
+          }
+
+          Write-Host "Patched CMakeLists snippets:"
+          Select-String -Path $cmakeFile -Pattern "github-actions-compat|unit_tests|benchmarks|libosrm.pc|zlib|bzip2" -Context 1,1
 
       - name: Configure OSRM with vcpkg dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path $env:OSRM_BUILD_DIR) { Remove-Item $env:OSRM_BUILD_DIR -Recurse -Force }
-          New-Item -ItemType Directory -Path $env:OSRM_BUILD_DIR | Out-Null
+          New-Item -ItemType Directory -Force C:\osrm-build | Out-Null
 
-          $vcpkgInstalled = "$env:VCPKG_ROOT\installed\x64-windows"
-          $includeDir = "$vcpkgInstalled\include"
-          $libDir = "$vcpkgInstalled\lib"
+          $tbbLib = "C:\tbb-install\lib\tbb.lib"
+          $tbbMallocLib = "C:\tbb-install\lib\tbbmalloc.lib"
+          if (-not (Test-Path $tbbLib)) { throw "Missing $tbbLib" }
+          if (-not (Test-Path $tbbMallocLib)) { throw "Missing $tbbMallocLib" }
+          Write-Host "Using TBB_LIBRARY=$tbbLib"
+          Write-Host "Using TBB_LIBRARY_DEBUG=$tbbLib"
+          Write-Host "Using TBB_MALLOC_LIBRARY=$tbbMallocLib"
+          Write-Host "Using TBB_MALLOC_LIBRARY_DEBUG=$tbbMallocLib"
 
-          cmake -S $env:OSRM_SOURCE_DIR -B $env:OSRM_BUILD_DIR `
-            -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+          cmake -S C:\osrm-src -B C:\osrm-build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DBUILD_TOOLS=OFF `
-            -DBUILD_PACKAGE=OFF `
-            -DENABLE_NODE_BINDINGS=OFF `
-            -DENABLE_MASON=OFF `
+            -DTBB_INCLUDE_DIR=C:\tbb-install\include `
+            -DTBB_INCLUDE_DIRS=C:\tbb-install\include `
+            -DTBB_LIBRARY=$tbbLib `
+            -DTBB_LIBRARY_RELEASE=$tbbLib `
+            -DTBB_LIBRARY_DEBUG=$tbbLib `
+            -DTBB_MALLOC_LIBRARY=$tbbMallocLib `
+            -DTBB_MALLOC_LIBRARY_RELEASE=$tbbMallocLib `
+            -DTBB_MALLOC_LIBRARY_DEBUG=$tbbMallocLib `
+            -DTBB_MALLOC_PROXY_LIBRARY=$tbbMallocLib `
+            -DTBB_MALLOC_PROXY_LIBRARY_RELEASE=$tbbMallocLib `
+            -DTBB_MALLOC_PROXY_LIBRARY_DEBUG=$tbbMallocLib `
+            -DBUILD_TESTING=OFF `
+            -DENABLE_TESTS=OFF `
+            -DENABLE_BENCHMARKS=OFF `
+            -DENABLE_ASSERTIONS=OFF `
+            -DENABLE_LTO=OFF `
+            -DENABLE_CCACHE=OFF `
             -DBoost_NO_WARN_NEW_VERSIONS=ON `
-            -DBOOST_ROOT="$vcpkgInstalled" `
-            -DBOOST_LIBRARYDIR="$libDir" `
-            -DBoost_USE_MULTITHREADED=ON `
-            -DBoost_USE_STATIC_LIBS=OFF `
-            -DTBB_INSTALL_DIR="$env:TBB_ROOT" `
-            -DTBB_INCLUDE_DIR="$env:TBB_ROOT\include" `
-            -DTBB_LIBRARY="$env:TBB_ROOT\lib\tbb.lib" `
-            -DTBB_MALLOC_LIBRARY="$env:TBB_ROOT\lib\tbbmalloc.lib" `
-            -DEXPAT_INCLUDE_DIR="$includeDir" `
-            -DEXPAT_LIBRARY="$libDir\expat.lib" `
-            -DBZIP2_INCLUDE_DIR="$includeDir" `
-            -DBZIP2_LIBRARIES="$libDir\bz2.lib" `
-            -DZLIB_INCLUDE_DIR="$includeDir" `
-            -DZLIB_LIBRARY="$libDir\zlib.lib" `
-            -DLUA_INCLUDE_DIR="$includeDir" `
-            -DLUA_LIBRARIES="$libDir\lua.lib"
+            -DBOOST_LIBRARYDIR=C:\vcpkg\installed\x64-windows\lib `
+            -DBOOST_INCLUDEDIR=C:\vcpkg\installed\x64-windows\include
 
       - name: Build osrm-routed
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cmake --build $env:OSRM_BUILD_DIR --config $env:BUILD_CONFIGURATION --target osrm-routed -- /m
+          cmake --build C:\osrm-build --config Release --target osrm-routed --parallel 2
 
       - name: Package runtime folder
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path $env:OSRM_RUNTIME_DIR) { Remove-Item $env:OSRM_RUNTIME_DIR -Recurse -Force }
-          New-Item -ItemType Directory -Path $env:OSRM_RUNTIME_DIR | Out-Null
+          New-Item -ItemType Directory -Force C:\osrm-runtime | Out-Null
 
-          $exe = Get-ChildItem $env:OSRM_BUILD_DIR -Recurse -Filter osrm-routed.exe | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
-          if (!$exe) { throw "osrm-routed.exe was not found" }
-          Copy-Item $exe.FullName $env:OSRM_RUNTIME_DIR -Force
+          $exe = Get-ChildItem C:\osrm-build -Recurse -Filter osrm-routed.exe | Select-Object -First 1
+          if (-not $exe) { throw "osrm-routed.exe was not found." }
+          Copy-Item $exe.FullName C:\osrm-runtime\ -Force
 
-          # Runtime DLLs from vcpkg dynamic packages.
-          $vcpkgBin = "$env:VCPKG_ROOT\installed\x64-windows\bin"
-          if (Test-Path $vcpkgBin) {
-            Copy-Item "$vcpkgBin\*.dll" $env:OSRM_RUNTIME_DIR -Force -ErrorAction SilentlyContinue
-          }
+          # Copy DLLs from the executable folder, vcpkg runtime bin, and old TBB runtime bin.
+          Copy-Item (Join-Path $exe.Directory.FullName "*.dll") C:\osrm-runtime\ -Force -ErrorAction SilentlyContinue
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\*.dll C:\osrm-runtime\ -Force -ErrorAction SilentlyContinue
+          Copy-Item C:\tbb-install\bin\*.dll C:\osrm-runtime\ -Force -ErrorAction SilentlyContinue
 
-          # Runtime DLLs from old TBB 2020.2.
-          Copy-Item "$env:TBB_ROOT\lib\*.dll" $env:OSRM_RUNTIME_DIR -Force -ErrorAction SilentlyContinue
+          @"
+OSRM Windows runtime built by GitHub Actions.
+Version: v5.26.0
+Copy every file in this artifact into TransportationDesktop\osrm\
+Then put canada-latest.osrm* into TransportationDesktop\osrm\data\
+"@ | Set-Content C:\osrm-runtime\RUNTIME_FILES.txt -Encoding UTF8
 
-          # VC++ runtime DLLs that may be needed outside the GitHub runner.
-          $vcRedistDirs = @(
-            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC",
-            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC",
-            "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC"
-          )
-          foreach ($base in $vcRedistDirs) {
-            if (Test-Path $base) {
-              Get-ChildItem $base -Recurse -Include vcruntime*.dll,msvcp*.dll,concrt*.dll | Where-Object { $_.FullName -match "x64" } | ForEach-Object {
-                Copy-Item $_.FullName $env:OSRM_RUNTIME_DIR -Force -ErrorAction SilentlyContinue
-              }
-            }
-          }
-
-          "OSRM Windows runtime built from Project-OSRM/osrm-backend $env:OSRM_VERSION" | Out-File "$env:OSRM_RUNTIME_DIR\RUNTIME_FILES.txt"
-          "Copy every file in this folder into TransportationDesktop\osrm\." | Add-Content "$env:OSRM_RUNTIME_DIR\RUNTIME_FILES.txt"
-          "Put your canada-latest.osrm* files into TransportationDesktop\osrm\data\." | Add-Content "$env:OSRM_RUNTIME_DIR\RUNTIME_FILES.txt"
-          "Test with: osrm-routed.exe --algorithm mld data\canada-latest.osrm" | Add-Content "$env:OSRM_RUNTIME_DIR\RUNTIME_FILES.txt"
-
-          Get-ChildItem $env:OSRM_RUNTIME_DIR | Sort-Object Name | Format-Table Name,Length
+          Get-ChildItem C:\osrm-runtime | Select-Object Name,Length
 
       - name: Upload OSRM Windows runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: osrm-v5.26.0-windows-x64-runtime-vcpkg-v6
+          name: osrm-v5.26.0-windows-x64-runtime
           path: C:\osrm-runtime\*
           if-no-files-found: error
