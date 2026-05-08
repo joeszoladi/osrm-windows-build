@@ -1,0 +1,113 @@
+name: Build OSRM v5.26.0 Windows Runtime
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-osrm-windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout OSRM v5.26.0
+        uses: actions/checkout@v4
+        with:
+          repository: Project-OSRM/osrm-backend
+          ref: v5.26.0
+
+      - name: Install VS2019 v142 build tools into VS2022
+        shell: pwsh
+        run: |
+          $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+          if (!(Test-Path $vsInstaller)) { throw "Visual Studio Installer not found: $vsInstaller" }
+          if (!(Test-Path $vsPath)) { throw "Visual Studio 2022 Enterprise not found: $vsPath" }
+
+          & $vsInstaller modify `
+            --installPath $vsPath `
+            --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 `
+            --quiet `
+            --norestart `
+            --nocache `
+            --wait
+
+      - name: Download OSRM v5.26 Windows dependency package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "http://project-osrm.wolt.com/windows-build-deps/osrm-deps-win-x64-14.2-2019.01.7z"
+          $out = "osrm-deps-win-x64-14.2-2019.01.7z"
+          Invoke-WebRequest $url -OutFile $out
+          7z x $out -y
+          if (!(Test-Path "osrm-deps\lib")) { throw "osrm-deps did not extract correctly" }
+
+      - name: Configure OSRM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $project = (Get-Location).Path
+          $deps = Join-Path $project "osrm-deps"
+          $env:TBB_INSTALL_DIR = $deps
+          $env:PATH = "$deps\lib;$env:PATH"
+
+          New-Item -ItemType Directory -Force build | Out-Null
+          Set-Location build
+
+          cmake .. `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -T v142 `
+            -DBOOST_ROOT="$deps" `
+            -DBOOST_LIBRARYDIR="$deps/lib" `
+            -DBoost_ADDITIONAL_VERSIONS=1.73.0 `
+            -DBoost_USE_MULTITHREADED=ON `
+            -DBoost_USE_STATIC_LIBS=ON `
+            -DEXPAT_INCLUDE_DIR="$deps" `
+            -DEXPAT_LIBRARY="$deps/lib/libexpat.lib" `
+            -DBZIP2_INCLUDE_DIR="$deps" `
+            -DBZIP2_LIBRARIES="$deps/lib/libbz2.lib" `
+            -DLUA_INCLUDE_DIR="$deps" `
+            -DLUA_LIBRARIES="$deps/lib/lua5.3.5.lib" `
+            -DZLIB_INCLUDE_DIR="$deps" `
+            -DZLIB_LIBRARY="$deps/lib/libz.lib" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$deps/libs"
+
+      - name: Build osrm-routed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location build
+          cmake --build . --config Release --target osrm-routed -- /m
+
+      - name: Package runtime folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = Join-Path (Get-Location).Path "dist\osrm"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+
+          $exe = Get-ChildItem -Path . -Recurse -Filter osrm-routed.exe | Select-Object -First 1
+          if (!$exe) { throw "osrm-routed.exe was not found after build" }
+          Copy-Item $exe.FullName $dist -Force
+
+          # Runtime dependency DLLs from the OSRM prebuilt dependency package.
+          Copy-Item "osrm-deps\lib\*.dll" $dist -Force -ErrorAction SilentlyContinue
+
+          # Visual C++ runtime DLLs commonly needed when running the EXE on a normal Windows install.
+          $vcRuntimeNames = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "concrt140.dll")
+          foreach ($name in $vcRuntimeNames) {
+            $src = Join-Path $env:WINDIR "System32\$name"
+            if (Test-Path $src) { Copy-Item $src $dist -Force }
+          }
+
+          # Write a manifest so you can see exactly what was included.
+          Get-ChildItem $dist | Sort-Object Name | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Set-Content (Join-Path $dist "RUNTIME_FILES.txt")
+          Get-ChildItem $dist | Sort-Object Name | ForEach-Object { $_.Name }
+
+      - name: Upload OSRM Windows runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osrm-v5.26.0-windows-x64-runtime
+          path: dist/osrm/**
+          if-no-files-found: error
