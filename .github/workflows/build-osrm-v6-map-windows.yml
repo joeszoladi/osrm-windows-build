@@ -63,15 +63,25 @@ jobs:
         shell: pwsh
         run: |
           $tools = @("osrm-routed.exe","osrm-extract.exe","osrm-partition.exe","osrm-customize.exe")
+          $toolPaths = @{}
+
           foreach ($tool in $tools) {
             $found = Get-ChildItem C:\osrm-official-v6 -Recurse -Filter $tool | Select-Object -First 1
             if (-not $found) { throw "$tool not found under C:\osrm-official-v6" }
+
             $envName = ($tool -replace "\.exe","" -replace "-","_").ToUpper()
-            echo "$envName=$($found.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            $toolPaths[$envName] = $found.FullName
+
+            # Available to later workflow steps
+            Add-Content -Path $env:GITHUB_ENV -Value "$envName=$($found.FullName)"
+
+            # Available inside this current step too
+            Set-Item -Path "Env:$envName" -Value $found.FullName
+
             Write-Host "$tool = $($found.FullName)"
           }
 
-          & "$env:OSRM_ROUTED" --version
+          & $toolPaths["OSRM_ROUTED"] --version
 
       - name: Get OSRM v6 profiles
         shell: pwsh
